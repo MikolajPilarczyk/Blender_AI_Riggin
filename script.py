@@ -40,7 +40,7 @@ FONT_THICKNESS = 2
 
 # Nagrywanie
 OUTPUT_DIR = "recordings"          # folder na pliki JSON
-ENTER_KEYS = (13, 10)              # Enter (zależnie od systemu 13 lub 10)
+ENTER_KEYS = (13, 10)              # Enter
 
 # Cache directory for downloaded models
 CACHE_DIR = os.path.expanduser("~/.opencv_models_cache")
@@ -342,21 +342,33 @@ class Recorder:
         self.start_time = time.time()
         print("● Nagrywanie rozpoczęte")
 
-    def add_frame(self, pose_world, hands):
-        """pose_world: tablica Nx5 lub None; hands: lista wektorów dłoni."""
+    def add_frame(self, pose_world, hands, pose_screen=None):
+        """pose_world: tablica Nx3/Nx5 lub None; pose_screen: tablica ekranowa lub None;
+        hands: lista wektorów dłoni."""
         if not self.recording:
             return
 
         frame_data = {
             "t": time.time() - self.start_time,
-            "pose": pose_world[:33, :5].tolist() if pose_world is not None else None,
+            "pose": None,
+            "pose_screen": None,
             "hands": [],
         }
+        if pose_world is not None:
+            pw = np.asarray(pose_world)[:33]
+            if pw.shape[1] < 5 and pose_screen is not None and np.asarray(pose_screen).shape[1] > 4:
+                # xyz z world + visibility/presence z screen
+                pw = np.hstack([pw[:, :3], np.asarray(pose_screen)[:33, 3:5]])
+            frame_data["pose"] = pw[:, :5].tolist()
+        if pose_screen is not None:
+            frame_data["pose_screen"] = np.asarray(pose_screen)[:33, :2].tolist()
+
         for h in hands:
             h = np.asarray(h).flatten()
             if len(h) >= 132:
                 frame_data["hands"].append({
                     "world": h[67:130].reshape(21, 3).tolist(),
+                    "screen": h[4:67].reshape(21, 3)[:, :2].tolist(),
                     "handedness": float(h[130]),
                     "conf": float(h[131]),
                 })
@@ -389,25 +401,20 @@ class Recorder:
 
         if self.recording:
             elapsed = time.time() - self.start_time
-
-
+            # migająca czerwona kropka
             if int(elapsed * 2) % 2 == 0:
                 cv2.circle(frame, (w - 150, 28), 10, (0, 0, 255), -1)
             mins, secs = divmod(int(elapsed), 60)
-
             cv2.putText(frame, f"REC {mins:02d}:{secs:02d}", (w - 130, 35),
                         FONT, 0.7, (0, 0, 255), 2)
-
             cv2.putText(frame, f"Klatki: {len(self.frames)}  |  ENTER - zakoncz",
                         (10, 90), FONT, FONT_SCALE, (0, 0, 255), 2)
-
-
+            # czerwona ramka wokół obrazu
             cv2.rectangle(frame, (0, 0), (w - 1, h - 1), (0, 0, 255), 4)
         else:
             cv2.putText(frame, "ENTER - rozpocznij nagrywanie", (10, 90),
                         FONT, FONT_SCALE, (0, 255, 255), 2)
-
-
+            # komunikat o zapisie przez 4 sekundy
             if self.last_saved and time.time() - self.last_saved_time < 4:
                 cv2.putText(frame, f"Zapisano: {os.path.basename(self.last_saved)}",
                             (10, 120), FONT, FONT_SCALE, (0, 255, 0), 2)
@@ -468,6 +475,7 @@ def run_detection(camera=0):
         frame = cv2.flip(frame, 1)
 
         pose_world = None
+        pose_screen = None
         hands = []
 
         # Pose + Face
@@ -481,13 +489,14 @@ def run_detection(camera=0):
                     draw_body_from_pose(frame, lm_screen, presence_thresh=POSE_PRESENCE_THRESHOLD)
                 if i == 0:  # nagrywamy tylko pierwszą wykrytą osobę
                     pose_world = lm_world
+                    pose_screen = lm_screen
 
         # Hands
         if DETECT_HANDS and palm_det is not None and hand_pose is not None:
             hands = detect_and_draw_hands(frame, palm_det, hand_pose)
 
         # Zapis klatki (tylko gdy trwa nagrywanie)
-        recorder.add_frame(pose_world, hands)
+        recorder.add_frame(pose_world, hands, pose_screen)
 
         # HUD
         fps = frame_count / max(1e-6, (time.time() - start_time))
