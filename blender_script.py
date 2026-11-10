@@ -16,7 +16,7 @@ import math
 from mathutils import Vector, Matrix
 
 # ====================== USTAWIENIA ======================
-PATH = r"C:\Users\uczen\PycharmProjects\WelcomeScreen\recordings\mocap_20261105_143735.json"
+PATH = r"E:\bairig\recordings\mocap_20261105_164412.json"
 ARMATURE_NAME = "Armature"
 PREFIX = "mixamorig:"
 
@@ -24,10 +24,32 @@ PREFIX = "mixamorig:"
 # False = postać NAŚLADUJE ciebie (podnosisz prawą -> postać podnosi prawą)
 MIRROR = True
 
-SMOOTHING = 0.3       # 1.0 = bez wygładzania, mniejsze = gładziej (ale większe opóźnienie)
+SMOOTHING = 0.05          # 1.0 = bez wygładzania, mniejsze = gładziej (ale większe opóźnienie)
 MIN_PRESENCE = 0.5       # punkt z mniejszą pewnością jest ignorowany (kość zostaje jak była)
-USE_HANDS = False         # dłonie i palce
+USE_HANDS = True         # dłonie i palce
 HANDEDNESS_HIGH_IS_RIGHT = True   # tylko dla starych nagrań bez współrzędnych ekranowych dłoni
+
+
+
+# --- KOREKTA POSTAWY (żeby postać wyglądała naturalnie mimo błędów głębi z jednej kamery) ---
+# Tułów
+UPRIGHT_BLEND = 0.5       # 0 = surowe dane, 1 = tułów zawsze pionowo
+MAX_LEAN_DEG = 12         # maksymalny przechył tułowia (stopnie); większe pochylenia są przycinane
+TORSO_DEPTH = 0.4         # tłumienie osi głębi dla tułowia (1 = bez tłumienia, 0 = wcale)
+HIP_ROLL_DAMP = 0.3       # tłumienie przechyłu bioder na boki (1 = bez tłumienia)
+# Głowa
+HEAD_UPRIGHT_BLEND = 0.3
+MAX_HEAD_TILT_DEG = 25
+HEAD_DEPTH = 0.5
+# Nogi
+LEG_CORRECTION = 0.6      # jak mocno ściągać nogi do naturalnego rozstawu (0 = wcale, 1 = zawsze)
+LEG_NATURAL_SPLAY_DEG = 4 # naturalne lekkie rozstawienie nóg (stopnie na zewnątrz)
+LEG_MAX_INWARD_DEG = 3    # jak bardzo noga może zajść do środka (blokuje krzyżowanie/zbliżanie kolan)
+LEG_MAX_OUTWARD_DEG = 25  # jak bardzo noga może odejść na zewnątrz
+LEG_DEPTH_SCALE = 0.5     # tłumienie głębi dla nóg (gdy stoją; kopnięcia i unoszenie nie są ruszane)
+FOOT_SPLAY_SCALE = 0.4    # tłumienie rozchylania stóp na boki
+# Kamera
+CAMERA_PITCH_DEG = 0      # jeśli kamera patrzy z dołu/góry, spróbuj np. 8 albo -8
 # ========================================================
 
 with open(PATH, "r") as f:
@@ -57,7 +79,13 @@ def rest_pos(short):
 
 def P(p):
     """MediaPipe (x w prawo, y w dół, z do kamery=mniejsze) -> Blender (X, Y w głąb, Z w górę)."""
-    return Vector((SX * p[0], p[2], -p[1]))
+    v = Vector((SX * p[0], p[2], -p[1]))
+    # korekta pochylenia kamery: obrót wokół osi X
+    return Vector((v.x, v.y * _CP - v.z * _SP, v.y * _SP + v.z * _CP))
+
+
+_CP = math.cos(math.radians(CAMERA_PITCH_DEG))
+_SP = math.sin(math.radians(CAMERA_PITCH_DEG))
 
 
 def lmi(left_idx, char_side):
@@ -135,6 +163,60 @@ def put(key, v):
         state[key] = s.normalized()
 
 
+VERTICAL = Vector((0.0, 0.0, 1.0))
+
+
+def fix_torso(d, depth_scale, blend, max_deg):
+    """Prostuje wektor 'w górę' (tułów/głowa): tłumi głębię, ciągnie do pionu i przycina przechył.
+    Duże, celowe pochylenia (>~70 stopni) zostają nietknięte, korekta zanika płynnie."""
+    raw = d.normalized()
+    c = Vector((raw.x, raw.y * depth_scale, raw.z))
+    if c.length < 1e-6:
+        return raw
+    c = c.normalized().lerp(VERTICAL, blend).normalized()
+
+    lim = math.radians(max_deg)
+    if c.angle(VERTICAL) > lim:
+        h = Vector((c.x, c.y, 0.0))
+        c = VERTICAL * math.cos(lim) if h.length < 1e-6 else \
+            h.normalized() * math.sin(lim) + VERTICAL * math.cos(lim)
+
+    ang = math.degrees(raw.angle(VERTICAL))
+    w = min(1.0, max(0.0, (70.0 - ang) / 35.0))   # 1 przy małym przechyle, 0 przy dużym
+    r = raw.lerp(c, w)
+    return r.normalized() if r.length > 1e-6 else raw
+
+
+def fix_leg(d, side, kind):
+    """Naturalny rozstaw nóg: ściąga je do lekkiego rozstawu, blokuje krzyżowanie
+    i tłumi głębię. Działa tylko gdy noga jest skierowana w dół (kopnięcia zostają)."""
+    raw = d.normalized()
+
+    if kind == "foot":
+        c = Vector((raw.x * FOOT_SPLAY_SCALE, raw.y, raw.z))
+        return c.normalized() if c.length > 1e-6 else raw
+
+    h = -raw.z
+    w = min(1.0, max(0.0, (h - 0.5) / 0.4))
+    if w <= 0.0:
+        return raw
+
+    out = 1.0 if side == "Left" else -1.0       # lewa noga jest po stronie +X
+    hh = max(h, 1e-3)
+    lat = raw.x * out                            # dodatnie = na zewnątrz
+    target = math.tan(math.radians(LEG_NATURAL_SPLAY_DEG)) * hh
+    lat += (target - lat) * LEG_CORRECTION
+    lo = -math.tan(math.radians(LEG_MAX_INWARD_DEG)) * hh
+    hi = math.tan(math.radians(LEG_MAX_OUTWARD_DEG)) * hh
+    lat = min(hi, max(lo, lat))
+
+    c = Vector((lat * out, raw.y * LEG_DEPTH_SCALE, raw.z))
+    if c.length < 1e-6:
+        return raw
+    r = raw.lerp(c.normalized(), w)
+    return r.normalized() if r.length > 1e-6 else raw
+
+
 def update_pose(pose):
     if pose is None:
         return  # brak wykrycia -> zostaje poprzednia pozycja
@@ -154,34 +236,41 @@ def update_pose(pose):
     if ok(lh, rh, ls, rs):
         hip_mid = (pt(lh) + pt(rh)) / 2
         sh_mid = (pt(ls) + pt(rs)) / 2
-        up = W2A @ (sh_mid - hip_mid)
-        put("Hips_up", up)
-        put("Hips_side", W2A @ (pt(lh) - pt(rh)))
+        up_w = fix_torso(sh_mid - hip_mid, TORSO_DEPTH, UPRIGHT_BLEND, MAX_LEAN_DEG)
+        side_w = pt(lh) - pt(rh)
+        side_w.z *= HIP_ROLL_DAMP          # biodra nie przechylają się na boki przez perspektywę
+        put("Hips_up", W2A @ up_w)
+        put("Hips_side", W2A @ side_w)
         for name in ("Spine", "Spine1", "Spine2"):
-            put(name, up)
+            put(name, W2A @ up_w)
         if ok(7, 8):
-            head_dir = W2A @ (((pt(7) + pt(8)) / 2) - sh_mid)
-            put("Neck", head_dir)
-            put("Head", head_dir)
+            head_w = fix_torso(((pt(7) + pt(8)) / 2) - sh_mid,
+                               HEAD_DEPTH, HEAD_UPRIGHT_BLEND, MAX_HEAD_TILT_DEG)
+            put("Neck", W2A @ head_w)
+            put("Head", W2A @ head_w)
 
-    limbs = [("Arm", 11, 13), ("ForeArm", 13, 15),
-             ("UpLeg", 23, 25), ("Leg", 25, 27), ("Foot", 27, 31)]
+    arms = [("Arm", 11, 13), ("ForeArm", 13, 15)]
+    legs = [("UpLeg", 23, 25, "leg"), ("Leg", 25, 27, "leg"), ("Foot", 27, 31, "foot")]
     for side in ("Left", "Right"):
-        for name, a, b in limbs:
+        for name, a, b in arms:
             ia, ib = lmi(a, side), lmi(b, side)
             if ok(ia, ib):
                 put(side + name, vec(ia, ib))
+        for name, a, b, kind in legs:
+            ia, ib = lmi(a, side), lmi(b, side)
+            if ok(ia, ib):
+                put(side + name, W2A @ fix_leg(pt(ib) - pt(ia), side, kind))
 
 
 FINGERS = {"Thumb": 1, "Index": 5, "Middle": 9, "Ring": 13, "Pinky": 17}
 
 
-def update_hands(fr): # Wyswietlanie dloni w zaleznosci od ustawien
+def update_hands(fr):
     if not USE_HANDS:
         return
     hands = fr.get("hands") or []
     if not hands:
-        return
+        return  # brak dłoni -> zostają poprzednie pozycje
 
     pose_s = fr.get("pose_screen")
     assigned = {}
@@ -213,7 +302,7 @@ def update_hands(fr): # Wyswietlanie dloni w zaleznosci od ustawien
             return W2A @ (P(w[b]) - P(w[a]))
 
         put(f"{side}Hand_up", v(0, 9))
-        put(f"{side}Hand_side", v(17, 5))
+        put(f"{side}Hand_side", v(17, 5))   # palec wskazujący minus mały
         for finger, base in FINGERS.items():
             for k in range(3):
                 put(f"{side}Hand{finger}{k + 1}", v(base + k, base + k + 1))
