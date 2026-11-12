@@ -20,6 +20,13 @@ import requests
 import importlib.util
 from datetime import datetime
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+try:
+    from mocap_settings import open_settings_window   # okno ustawień (klawisz S)
+except ImportError:
+    open_settings_window = None
+
 # ============================================================================
 # Configuration
 # ============================================================================
@@ -39,8 +46,8 @@ FONT_SCALE = 0.6
 FONT_THICKNESS = 2
 
 # Nagrywanie
-OUTPUT_DIR = "recordings"          # folder na pliki JSON
-ENTER_KEYS = (13, 10)              # Enter
+OUTPUT_DIR = os.path.join(BASE_DIR, "recordings")          # folder na pliki JSON
+ENTER_KEYS = (13, 10)              # Enter (zależnie od systemu 13 lub 10)
 
 # Cache directory for downloaded models
 CACHE_DIR = os.path.expanduser("~/.opencv_models_cache")
@@ -502,7 +509,7 @@ def run_detection(camera=0):
         fps = frame_count / max(1e-6, (time.time() - start_time))
         cv2.putText(frame, f'CPU Mode | FPS: {fps:.1f}', (10, 30),
                     FONT, 0.7, (255, 255, 255), 2)
-        cv2.putText(frame, f'{", ".join(enabled)} | Q - wyjscie', (10, 60),
+        cv2.putText(frame, f'{", ".join(enabled)} | S - ustawienia | Q - wyjscie', (10, 60),
                     FONT, FONT_SCALE, (255, 255, 255), 2)
         recorder.draw_overlay(frame)
 
@@ -514,6 +521,11 @@ def run_detection(camera=0):
                 recorder.stop_and_save()
             else:
                 recorder.start()
+        elif key in (ord('s'), ord('S')):
+            if open_settings_window is None:
+                print("Brak pliku mocap_settings.py obok skryptu - okno ustawień niedostępne")
+            elif not open_settings_window():
+                print("Okno ustawień jest już otwarte")
         elif key == ord('q'):
             break
 
